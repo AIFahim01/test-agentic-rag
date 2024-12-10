@@ -1,1 +1,3 @@
-# test-agentic-rag
+# RAG Project
+
+This project uses LLMs for Retrieval-Augmented Generation.
