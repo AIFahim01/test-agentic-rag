@@ -1,6 +1,6 @@
 import chromadb
 from chromadb.config import Settings
-
+from utils.embeddings import get_embeddings
 
 class ChromaManager:
     def __init__(self, collection_name="papers_collection", persist_directory=".chromadb"):
@@ -31,3 +31,10 @@ class ChromaManager:
             n_results=top_k
         )
         return results
+
+def build_retriever(chroma_manager: ChromaManager, similarity_top_k=3):
+    def retriever(query: str):
+        query_embedding = get_embeddings(query)
+        results = chroma_manager.query(query_embedding, top_k=similarity_top_k)
+        return results
+    return retriever
