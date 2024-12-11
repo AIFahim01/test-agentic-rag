@@ -1,49 +1,66 @@
-from pathlib import Path
-from config import PDFS, SIMILARITY_TOP_K, OPENAI_API_KEY
-from llm.llm_init import initialize_llm
-from indexing.chroma_manager import ChromaManager
-from indexing.retriever_builder import build_retriever
-from agents.agent_factory import create_agent
-from services.embeddings_services import get_embeddings
-from services.text_pre_processing import extract_text_from_pdf, chunk_text
+from dotenv import load_dotenv
+from services.agentic_rag_service import LLMRAgentService
+from services.vanila_rag_service import RAGService
+from rich.prompt import Prompt
+import os
+
+
+def main():
+    # Load environment variables
+    load_dotenv()
+
+    # Configuration from environment variables
+    PDF_PATH = os.getenv("PDF_PATH", "src/data/pdfs")
+    COLLECTION_NAME = os.getenv("COLLECTION_NAME", "pdf_documents")
+    DB_PATH = os.getenv("DB_PATH", ".chromadb")
+    USER = os.getenv("USER", "user")  # Default user
+
+    # Initialize the Agentic RAG service
+    agentic_rag_service = LLMRAgentService(
+        pdf_path=PDF_PATH,
+        collection=COLLECTION_NAME,
+        db_path=DB_PATH,
+        enable_rag=True,
+        persistent=True,
+    )
+
+    # Initialize the Vanilla RAG service
+    vanilla_rag_service = RAGService(
+        pdf_path=PDF_PATH,
+        collection_name=COLLECTION_NAME,
+        db_path=DB_PATH,
+    )
+
+    # Index PDFs for Vanilla RAG
+    print("Indexing PDFs for Vanilla RAG...")
+    vanilla_rag_service.index_pdfs()
+
+    print(f"Interactive session started for {USER}.")
+    print("Type 'exit' to quit.")
+
+    while True:
+        # Get user input
+        message = Prompt.ask(f"{USER}: ")
+        if message.lower() in ("exit", "bye"):
+            print("Goodbye!")
+            break
+
+        # Agentic RAG response
+        print("\n[Agentic RAG Response]")
+        try:
+            agentic_response = agentic_rag_service.agent.run(message)
+            print(agentic_response.content)
+        except Exception as e:
+            print(f"Error in Agentic RAG: {e}")
+
+        # Vanilla RAG response
+        print("\n[Vanilla RAG Response]")
+        try:
+            vanilla_response = vanilla_rag_service.query(message)
+            print(vanilla_response)
+        except Exception as e:
+            print(f"Error in Vanilla RAG: {e}")
+
 
 if __name__ == "__main__":
-    llm = initialize_llm()
-
-    all_chunks = []
-    for pdf_path in PDFS:
-        print(f"Processing paper: {pdf_path}")
-        text = extract_text_from_pdf(pdf_path)
-        doc_id = Path(pdf_path).stem
-        chunks = chunk_text(text)
-
-        # Get embeddings for these chunks
-        embeddings = get_embeddings(chunks)
-
-        for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
-            all_chunks.append({
-                "doc_id": doc_id,
-                "chunk_id": i,
-                "text": chunk,
-                "embedding": embedding
-            })
-
-
-    chroma_manager = ChromaManager(collection_name="papers_collection", persist_directory=".chromadb")
-    chroma_manager.add_documents(all_chunks)
-
-
-    obj_retriever = build_retriever(chroma_manager, similarity_top_k=SIMILARITY_TOP_K)
-
-
-    with open("src/agents/prompts/system_prompt.txt", "r") as f:
-        system_prompt = f.read()
-
-
-    agent = create_agent(tool_retriever=obj_retriever, llm=llm, system_prompt=system_prompt, verbose=True)
-
-
-    query1 = "Tell me about the evaluation dataset used in LongLoRA, and then tell me about the evaluation results."
-    response1 = agent.query(query1)
-    print("Response 1:", response1)
-
+    main()

@@ -1,40 +1,27 @@
-import chromadb
-from chromadb.config import Settings
-from utils.embeddings import get_embeddings
+from phi.vectordb.chroma import ChromaDb
+from phi.embedder.openai import OpenAIEmbedder
+from pathlib import Path
+from pypdf import PdfReader
 
-class ChromaManager:
-    def __init__(self, collection_name="papers_collection", persist_directory=".chromadb"):
-        self.client = chromadb.Client(Settings(
-            chroma_db_impl="duckdb+parquet",
-            persist_directory=persist_directory
-        ))
-        self.collection = self._get_or_create_collection(collection_name)
+class IndexingService:
+    def __init__(self, chroma_path=".chromadb", collection_name="pdf_documents"):
+        self.vector_db = ChromaDb(collection=collection_name, path=chroma_path)
+        self.embedder = OpenAIEmbedder()
 
-    def _get_or_create_collection(self, name):
-        if name not in [c.name for c in self.client.list_collections()]:
-            return self.client.create_collection(name=name)
-        return self.client.get_collection(name=name)
+    def process_pdf(self, pdf_path):
+        """
+        Extract text from PDF and index it.
+        :param pdf_path: Path to the PDF file.
+        """
+        reader = PdfReader(pdf_path)
+        document_id = Path(pdf_path).stem
 
-    def add_documents(self, docs):
-        # docs is a list of dict with keys: doc_id, chunk_id, text, embedding
-        for doc in docs:
-            self.collection.add(
-                embeddings=[doc["embedding"]],
-                documents=[doc["text"]],
-                ids=[f"{doc['doc_id']}-{doc['chunk_id']}"],
-                metadatas=[{"doc_id": doc["doc_id"], "chunk_id": doc["chunk_id"]}]
+        for page in reader.pages:
+            text = page.extract_text()
+            embedding = self.embedder.get_embedding(text)
+
+            self.vector_db.add(
+                documents=[text],
+                embeddings=[embedding],
+                metadatas=[{"document_id": document_id}]
             )
-
-    def query(self, query_embedding, top_k=3):
-        results = self.collection.query(
-            query_embeddings=[query_embedding],
-            n_results=top_k
-        )
-        return results
-
-def build_retriever(chroma_manager: ChromaManager, similarity_top_k=3):
-    def retriever(query: str):
-        query_embedding = get_embeddings(query)
-        results = chroma_manager.query(query_embedding, top_k=similarity_top_k)
-        return results
-    return retriever
