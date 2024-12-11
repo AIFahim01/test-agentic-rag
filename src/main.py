@@ -4,8 +4,8 @@ from llm.llm_init import initialize_llm
 from indexing.chroma_manager import ChromaManager
 from indexing.retriever_builder import build_retriever
 from agents.agent_factory import create_agent
-from utils.embeddings import get_embeddings
-from utils.text_pre_processing import extract_text_from_pdf, chunk_text
+from services.embeddings_services import get_embeddings
+from services.text_pre_processing import extract_text_from_pdf, chunk_text
 
 if __name__ == "__main__":
     llm = initialize_llm()
