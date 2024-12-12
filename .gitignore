@@ -1,13 +1,94 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
+*~$
+*.swp
+*.swo
+.DS_Store
 
 # IDE directories
 .idea/
+*.ipr
+*.iws
+*.iml
+.vscode/
 
 # Logs
 *.log
+logs/
+*.out
 
 # Environments
-.env/
+.env
 venv/
+env/
+.venv/
+ENV/
+
+# OS generated files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Build artifacts
+build/
+dist/
+target/
+*.egg-info/
+
+# Packages
+node_modules/
+jspm_packages/
+
+# Temporary files
+*.tmp
+*.bak
+*.orig
+
+# Editor backups
+*~
+*.swp
+*.swo
+
+# Other
+.pytest_cache/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.DS_Store
+.vscode/
+.history/
+*.orig
+*.rej
+*~
+*.swp
+*.swo
+*.diff
+*.patch
+*.bak
+*.tmp
+*.lock
+*.DS_Store
+*.log
+*.out
+*.iml
+*.ipr
+*.iws
+*.idea/
+.idea/
+.idea/workspace.xml
+.idea/tasks.xml
+.idea/modules.xml
+.idea/shelf/
+.idea/*.iml
+.idea/misc.xml
+.idea/vcs.xml
+.idea/modules.xml
+.idea/*.ipr
+.idea/*.iws
+.idea/dataSources.local.xml
+.idea/dataSources.ids.xml
+.idea/dataSources.xml
+.idea/sqlDataSources.xml
+*.DS_Store
