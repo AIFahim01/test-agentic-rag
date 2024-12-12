@@ -76,7 +76,7 @@ test-agentic-rag/
 │   │   ├── vanila_rag_service.py     # Vanilla RAG implementation
 │   │   ├── embeddings_services.py    # Handles embeddings and vector storage
 │   │   ├── text_cleaner_service.py   # Preprocesses text for embeddings
-│   │   └── knowledge_base_service.py # Knowledge base management
+│   │   └── knowledge_base_service.py # Pdf knowledgebase for Agentic RAG
 │   └── data/
 │       └── pdfs/             # Store PDF files here
 ├── requirements.txt           # Python dependencies
