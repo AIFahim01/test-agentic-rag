@@ -2,10 +2,11 @@ import openai
 from phi.agent import Agent
 from phi.model.openai import OpenAIChat
 from phi.vectordb.chroma import ChromaDb
-from unstructured.partition.pdf import partition_pdf
 from pathlib import Path
 from dotenv import load_dotenv
 import os
+import subprocess
+import json
 
 # Load environment variables
 load_dotenv()
@@ -23,6 +24,26 @@ def get_embedding(text, model="text-embedding-ada-002"):
     except Exception as e:
         print(f"Error generating embedding: {e}")
         return None
+
+
+def extract_tables_with_nougat(pdf_path, output_dir="output_tables"):
+    """Extract tables from the PDF using Nougat OCR."""
+    try:
+        # Run Nougat command to extract tables
+        subprocess.run(
+            ["nougat", pdf_path, "-o", output_dir],
+            check=True
+        )
+        # Read the extracted tables as JSON
+        tables = []
+        for table_file in Path(output_dir).glob("*.json"):
+            with open(table_file, "r") as file:
+                table_data = json.load(file)
+                tables.append(table_data)
+        return tables
+    except Exception as e:
+        print(f"Error extracting tables with Nougat: {e}")
+        return []
 
 
 class MultimodalRAG:
@@ -49,25 +70,16 @@ class MultimodalRAG:
         )
 
     def parse_pdf(self):
-        """Parse the PDF into text, tables, and images using Unstructured."""
-        raw_elements = partition_pdf(
-            filename=self.pdf_path,
-            extract_images_in_pdf=True,
-            infer_table_structure=True,
-            chunking_strategy="by_title",
-            max_characters=4000,
-            # combine_text_under_n_chars=2000,
-            strategy='hi_res'
-        )
+        """Parse the PDF into text, tables (using Nougat), and images."""
+        # Extract tables using Nougat
+        nougat_tables = extract_tables_with_nougat(self.pdf_path)
+
+        # Manually categorize elements
         categorized_elements = []
-        for element in raw_elements:
-            element_type = str(type(element))
-            if "unstructured.documents.elements.Table" in element_type:
-                categorized_elements.append({"type": "table", "content": str(element)})
-            elif "unstructured.documents.elements.CompositeElement" in element_type:
-                categorized_elements.append({"type": "text", "content": str(element)})
-            elif "unstructured.documents.elements.Image" in element_type:
-                categorized_elements.append({"type": "image", "content": element.image_path})
+
+        # Add Nougat tables to categorized elements
+        for table in nougat_tables:
+            categorized_elements.append({"type": "table", "content": json.dumps(table)})
 
         return categorized_elements
 
@@ -79,7 +91,7 @@ class MultimodalRAG:
                     summary = self.agent.print_response(f"Summarize the following text:\n\n{element['content']}",
                                                         stream=False)
                     if summary and isinstance(summary, str) and summary.strip():
-                        print(f"Processing text summary: {summary[:50]}...")  # Log first 50 characters
+                        print(f"Processing text summary: {summary[:50]}...")
                         embedding = get_embedding(summary)
                         if embedding:
                             self.text_vector_db.add(
@@ -93,21 +105,20 @@ class MultimodalRAG:
                         print("Summary for text element is empty or invalid. Skipping.")
 
                 elif element["type"] == "table":
-                    summary = self.agent.print_response(f"Summarize the following table:\n\n{element['content']}",
-                                                        stream=False)
-                    if summary and isinstance(summary, str) and summary.strip():
-                        print(f"Processing table summary: {summary[:50]}...")  # Log first 50 characters
-                        embedding = get_embedding(summary)
+                    table_content = element.get("content", "").strip()
+                    if table_content:
+                        print(f"Processing table content: {table_content[:50]}...")
+                        embedding = get_embedding(table_content)
                         if embedding:
                             self.text_vector_db.add(
-                                documents=[summary],
+                                documents=[table_content],
                                 embeddings=[embedding],
-                                ids=[f"table-{hash(summary)}"],
+                                ids=[f"table-{hash(table_content)}"],
                             )
                         else:
-                            print(f"Failed to generate embedding for table: {summary}")
+                            print(f"Failed to generate embedding for table: {table_content}")
                     else:
-                        print("Summary for table element is empty or invalid. Skipping.")
+                        print("Table content is empty or invalid. Skipping.")
 
                 elif element["type"] == "image":
                     image_path = element["content"]
@@ -115,7 +126,7 @@ class MultimodalRAG:
                         f"Describe the following image in detail.", images=[image_path], stream=False
                     )
                     if description and isinstance(description, str) and description.strip():
-                        print(f"Processing image description: {description[:50]}...")  # Log first 50 characters
+                        print(f"Processing image description: {description[:50]}...")
                         embedding = get_embedding(description)
                         if embedding:
                             self.image_vector_db.add(
@@ -133,11 +144,9 @@ class MultimodalRAG:
 
     def query(self, prompt: str):
         """Query the system to retrieve relevant content and generate a response."""
-        # Retrieve relevant text summaries
         text_results = self.text_vector_db.query(query_texts=[prompt], n_results=3)
         image_results = self.image_vector_db.query(query_texts=[prompt], n_results=3)
 
-        # Combine retrieved content into a context
         context = "### Text Summaries:\n"
         for doc in text_results["documents"]:
             context += f"- {doc}\n"
@@ -146,7 +155,6 @@ class MultimodalRAG:
         for doc in image_results["documents"]:
             context += f"- {doc}\n"
 
-        # Generate a response using GPT-4o
         final_response = self.agent.print_response(f"Context:\n{context}\n\nQuestion: {prompt}", stream=True)
         return final_response
 
@@ -159,19 +167,14 @@ if __name__ == "__main__":
     rag = MultimodalRAG(pdf_path, collection, db_path)
     parsed_elements = rag.parse_pdf()
 
-    print(parsed_elements)
-
     tables = [el for el in parsed_elements if el["type"] == "table"]
     if not tables:
         print("No tables found in the parsed PDF.")
     else:
         print("First table content:", tables[0]["content"])
 
-    # Access table content and metadata
-    print(tables[0]["content"])
-    # print(parsed_elements)
+    # Uncomment below lines to process elements or query the system.
     # rag.process_elements(parsed_elements)
-    #
     # query = "What are the key insights from the tables and images in the document?"
     # response = rag.query(query)
-    print(response)
+    # print(response)
