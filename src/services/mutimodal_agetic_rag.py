@@ -2,11 +2,12 @@ import openai
 from phi.agent import Agent
 from phi.model.openai import OpenAIChat
 from phi.vectordb.chroma import ChromaDb
+from phi.embedder.openai import OpenAIEmbedder
+from gmft.auto import AutoTableDetector
+from gmft.pdf_bindings import PyPDFium2Document
 from pathlib import Path
 from dotenv import load_dotenv
 import os
-import subprocess
-import json
 
 # Load environment variables
 load_dotenv()
@@ -15,47 +16,49 @@ load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
 
-def get_embedding(text, model="text-embedding-ada-002"):
-    """Generate embeddings using OpenAI's embedding API."""
-    text = text.replace("\n", " ")  # Clean up the text
-    try:
-        response = openai.Embedding.create(input=[text], model=model)
-        return response["data"][0]["embedding"]
-    except Exception as e:
-        print(f"Error generating embedding: {e}")
-        return None
+def extract_tables_with_gmft(pdf_path, output_folder):
+    """Extract tables from the PDF using GMFT and save them as images."""
+    detector = AutoTableDetector()
+    tables = []
 
-
-def extract_tables_with_nougat(pdf_path, output_dir="output_tables"):
-    """Extract tables from the PDF using Nougat OCR."""
     try:
-        # Run Nougat command to extract tables
-        subprocess.run(
-            ["nougat", pdf_path, "-o", output_dir],
-            check=True
-        )
-        # Read the extracted tables as JSON
-        tables = []
-        for table_file in Path(output_dir).glob("*.json"):
-            with open(table_file, "r") as file:
-                table_data = json.load(file)
-                tables.append(table_data)
-        return tables
+        # Use PyPDFium2 to load and parse the PDF
+        doc = PyPDFium2Document(pdf_path)
+        for page_number, page in enumerate(doc, start=1):
+            detected_tables = detector.extract(page)
+            for idx, table in enumerate(detected_tables, start=1):
+                # Save the table as an image
+                table_image = table.image()
+                image_filename = f"table_page{page_number}_table{idx}.png"
+                image_path = os.path.join(output_folder, image_filename)
+                table_image.save(image_path)
+                print(f"Saved table from page {page_number} as image: {image_path}")
+                tables.append({
+                    "page": page_number,
+                    "index": idx,
+                    "image_path": image_path
+                })
+        doc.close()  # Clean up the document
     except Exception as e:
-        print(f"Error extracting tables with Nougat: {e}")
+        print(f"Error extracting tables with GMFT: {e}")
         return []
+
+    return tables
 
 
 class MultimodalRAG:
     def __init__(self, pdf_path: str, collection: str, db_path: str):
         self.pdf_path = pdf_path
+        self.embedder = OpenAIEmbedder()  # Use OpenAIEmbedder for embeddings
         self.text_vector_db = ChromaDb(
             collection=f"{collection}_text",
+            embedder=self.embedder,
             path=db_path,
             persistent_client=True,
         )
         self.image_vector_db = ChromaDb(
             collection=f"{collection}_images",
+            embedder=self.embedder,
             path=db_path,
             persistent_client=True,
         )
@@ -69,17 +72,22 @@ class MultimodalRAG:
             markdown=True,
         )
 
-    def parse_pdf(self):
-        """Parse the PDF into text, tables (using Nougat), and images."""
-        # Extract tables using Nougat
-        nougat_tables = extract_tables_with_nougat(self.pdf_path)
+    def parse_pdf(self, table_output_folder):
+        """Parse the PDF and save tables as images."""
+        os.makedirs(table_output_folder, exist_ok=True)
 
-        # Manually categorize elements
+        # Extract tables using GMFT and save them as images
+        tables = extract_tables_with_gmft(self.pdf_path, table_output_folder)
+
         categorized_elements = []
 
-        # Add Nougat tables to categorized elements
-        for table in nougat_tables:
-            categorized_elements.append({"type": "table", "content": json.dumps(table)})
+        # Add GMFT tables to categorized elements
+        for table in tables:
+            categorized_elements.append({
+                "type": "table",
+                "content": f"Table on page {table['page']}, index {table['index']}",
+                "image_path": table["image_path"]
+            })
 
         return categorized_elements
 
@@ -87,94 +95,71 @@ class MultimodalRAG:
         """Process text, tables, and images, storing them in the vector database."""
         for element in elements:
             try:
-                if element["type"] == "text":
-                    summary = self.agent.print_response(f"Summarize the following text:\n\n{element['content']}",
-                                                        stream=False)
-                    if summary and isinstance(summary, str) and summary.strip():
-                        print(f"Processing text summary: {summary[:50]}...")
-                        embedding = get_embedding(summary)
-                        if embedding:
-                            self.text_vector_db.add(
-                                documents=[summary],
-                                embeddings=[embedding],
-                                ids=[f"text-{hash(summary)}"],
-                            )
-                        else:
-                            print(f"Failed to generate embedding for text: {summary}")
-                    else:
-                        print("Summary for text element is empty or invalid. Skipping.")
-
-                elif element["type"] == "table":
-                    table_content = element.get("content", "").strip()
-                    if table_content:
-                        print(f"Processing table content: {table_content[:50]}...")
-                        embedding = get_embedding(table_content)
-                        if embedding:
-                            self.text_vector_db.add(
-                                documents=[table_content],
-                                embeddings=[embedding],
-                                ids=[f"table-{hash(table_content)}"],
-                            )
-                        else:
-                            print(f"Failed to generate embedding for table: {table_content}")
-                    else:
-                        print("Table content is empty or invalid. Skipping.")
-
-                elif element["type"] == "image":
-                    image_path = element["content"]
-                    description = self.agent.print_response(
-                        f"Describe the following image in detail.", images=[image_path], stream=False
-                    )
-                    if description and isinstance(description, str) and description.strip():
-                        print(f"Processing image description: {description[:50]}...")
-                        embedding = get_embedding(description)
+                if element["type"] == "table":
+                    image_path = element.get("image_path", "").strip()
+                    if image_path:
+                        print(f"Processing table image at: {image_path}")
+                        embedding = self.embedder.get_embedding(f"Table image saved at {image_path}")
                         if embedding:
                             self.image_vector_db.add(
-                                documents=[description],
+                                documents=[f"Table saved at {image_path}"],
                                 embeddings=[embedding],
-                                ids=[f"image-{hash(description)}"],
+                                ids=[f"table-{hash(image_path)}"],
                             )
                         else:
-                            print(f"Failed to generate embedding for image: {description}")
+                            print(f"Failed to generate embedding for table image at: {image_path}")
                     else:
-                        print(f"Description for image {image_path} is empty. Skipping.")
+                        print("Table image path is empty or invalid. Skipping.")
 
             except Exception as e:
                 print(f"Error processing element: {element}. Error: {e}")
 
     def query(self, prompt: str):
         """Query the system to retrieve relevant content and generate a response."""
-        text_results = self.text_vector_db.query(query_texts=[prompt], n_results=3)
-        image_results = self.image_vector_db.query(query_texts=[prompt], n_results=3)
+        try:
+            # Embed the prompt to create the query vector
+            query_embedding = self.embedder.get_embedding(prompt)
 
-        context = "### Text Summaries:\n"
-        for doc in text_results["documents"]:
-            context += f"- {doc}\n"
+            # Query text vector database
+            text_results = self.text_vector_db.get_nearest_neighbors(
+                query_embedding=query_embedding,
+                n_results=3
+            )
 
-        context += "\n### Image Descriptions:\n"
-        for doc in image_results["documents"]:
-            context += f"- {doc}\n"
+            # Query image vector database
+            image_results = self.image_vector_db.get_nearest_neighbors(
+                query_embedding=query_embedding,
+                n_results=3
+            )
 
-        final_response = self.agent.print_response(f"Context:\n{context}\n\nQuestion: {prompt}", stream=True)
-        return final_response
+            # Combine results into a readable context
+            context = "### Text Summaries:\n"
+            for doc, distance in text_results:
+                context += f"- {doc} (Distance: {distance})\n"
+
+            context += "\n### Image Descriptions:\n"
+            for doc, distance in image_results:
+                context += f"- {doc} (Distance: {distance})\n"
+
+            # Generate a response using GPT-4o
+            final_response = self.agent.print_response(f"Context:\n{context}\n\nQuestion: {prompt}", stream=True)
+            return final_response
+
+        except Exception as e:
+            print(f"Error during query: {e}")
+            return "An error occurred while querying the knowledge base."
 
 
 if __name__ == "__main__":
     pdf_path = "/home/aifahim/PycharmProjects/test-agentic-rag/src/data/pdfs/Otani_Toward_Verifiable_and_Reproducible_Human_Evaluation_for_Text-to-Image_Generation_CVPR_2023_paper.pdf"
     collection = "multimodal_rag_collection"
-    db_path = "."
+    db_path = "./knowledge_base"
+    table_output_folder = "./extracted_tables"
 
     rag = MultimodalRAG(pdf_path, collection, db_path)
-    parsed_elements = rag.parse_pdf()
+    parsed_elements = rag.parse_pdf(table_output_folder)
+    rag.process_elements(parsed_elements)
 
-    tables = [el for el in parsed_elements if el["type"] == "table"]
-    if not tables:
-        print("No tables found in the parsed PDF.")
-    else:
-        print("First table content:", tables[0]["content"])
-
-    # Uncomment below lines to process elements or query the system.
-    # rag.process_elements(parsed_elements)
-    # query = "What are the key insights from the tables and images in the document?"
-    # response = rag.query(query)
-    # print(response)
+    query = "What insights can we gain from the document?"
+    response = rag.query(query)
+    print(response)
