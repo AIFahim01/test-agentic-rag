@@ -1,33 +1,34 @@
 import openai
-from phi.agent import Agent
-from phi.model.openai import OpenAIChat
-from phi.vectordb.chroma import ChromaDb
-from phi.embedder.openai import OpenAIEmbedder
-from gmft.auto import AutoTableDetector
-from gmft.pdf_bindings import PyPDFium2Document
+import os
 from pathlib import Path
 from dotenv import load_dotenv
-import os
+
+from phi.agent import Agent, RunResponse
+from phi.model.openai import OpenAIChat
+from phi.knowledge.langchain import LangChainKnowledgeBase
+
+from langchain.embeddings import OpenAIEmbeddings
+from langchain.docstore.document import Document
+# from langchain.text_splitter import CharacterTextSplitter
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.vectorstores import Chroma
+
+from gmft.auto import AutoTableDetector
+from gmft.pdf_bindings import PyPDFium2Document
+import pypdfium2 as pdfium
 
 # Load environment variables
 load_dotenv()
-
-# Initialize OpenAI client
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-
 def extract_tables_with_gmft(pdf_path, output_folder):
-    """Extract tables from the PDF using GMFT and save them as images."""
     detector = AutoTableDetector()
     tables = []
-
     try:
-        # Use PyPDFium2 to load and parse the PDF
         doc = PyPDFium2Document(pdf_path)
         for page_number, page in enumerate(doc, start=1):
             detected_tables = detector.extract(page)
             for idx, table in enumerate(detected_tables, start=1):
-                # Save the table as an image
                 table_image = table.image()
                 image_filename = f"table_page{page_number}_table{idx}.png"
                 image_path = os.path.join(output_folder, image_filename)
@@ -38,30 +39,38 @@ def extract_tables_with_gmft(pdf_path, output_folder):
                     "index": idx,
                     "image_path": image_path
                 })
-        doc.close()  # Clean up the document
+        doc.close()
     except Exception as e:
         print(f"Error extracting tables with GMFT: {e}")
         return []
-
     return tables
 
+def extract_pdf_text_with_pdfium(pdf_path):
+    all_text = []
+    try:
+        pdf = pdfium.PdfDocument(pdf_path)
+        for i in range(len(pdf)):
+            page = pdf[i]
+            textpage = page.get_textpage()
+            page_text = textpage.get_text_range()
+            if page_text and page_text.strip():
+                all_text.append(page_text)
+    except Exception as e:
+        print(f"Error extracting text from PDF: {e}")
+    return "\n".join(all_text)
 
 class MultimodalRAG:
     def __init__(self, pdf_path: str, collection: str, db_path: str):
         self.pdf_path = pdf_path
-        self.embedder = OpenAIEmbedder()  # Use OpenAIEmbedder for embeddings
-        self.text_vector_db = ChromaDb(
-            collection=f"{collection}_text",
-            embedder=self.embedder,
-            path=db_path,
-            persistent_client=True,
-        )
-        self.image_vector_db = ChromaDb(
-            collection=f"{collection}_images",
-            embedder=self.embedder,
-            path=db_path,
-            persistent_client=True,
-        )
+        self.collection = collection
+        self.db_path = db_path
+
+        # Use OpenAIEmbeddings
+        self.embeddings = OpenAIEmbeddings(openai_api_key=os.getenv("OPENAI_API_KEY"))
+        self.vectorstore = None
+        self.knowledge_base = None
+
+        # Agent for text-based Q&A
         self.agent = Agent(
             model=OpenAIChat(id="gpt-4o", api_key=os.getenv("OPENAI_API_KEY")),
             instructions=[
@@ -72,83 +81,97 @@ class MultimodalRAG:
             markdown=True,
         )
 
+        # Vision-capable agent (Placeholder GPT-4 Vision)
+        self.vision_agent = Agent(
+            model=OpenAIChat(id="gpt-4o", api_key=os.getenv("OPENAI_API_KEY")),
+            markdown=True,
+            instructions=[
+                "You are a vision-capable assistant. You will be given an image and asked to create a textual description about it.",
+                "Respond with a detailed textual interpretation of the image's content.",
+            ]
+        )
+
+    def extract_pdf_text(self):
+        return extract_pdf_text_with_pdfium(self.pdf_path)
+
     def parse_pdf(self, table_output_folder):
-        """Parse the PDF and save tables as images."""
         os.makedirs(table_output_folder, exist_ok=True)
-
-        # Extract tables using GMFT and save them as images
         tables = extract_tables_with_gmft(self.pdf_path, table_output_folder)
-
         categorized_elements = []
-
-        # Add GMFT tables to categorized elements
         for table in tables:
             categorized_elements.append({
                 "type": "table",
                 "content": f"Table on page {table['page']}, index {table['index']}",
                 "image_path": table["image_path"]
             })
-
         return categorized_elements
 
-    def process_elements(self, elements):
-        """Process text, tables, and images, storing them in the vector database."""
-        for element in elements:
-            try:
-                if element["type"] == "table":
-                    image_path = element.get("image_path", "").strip()
-                    if image_path:
-                        print(f"Processing table image at: {image_path}")
-                        embedding = self.embedder.get_embedding(f"Table image saved at {image_path}")
-                        if embedding:
-                            self.image_vector_db.add(
-                                documents=[f"Table saved at {image_path}"],
-                                embeddings=[embedding],
-                                ids=[f"table-{hash(image_path)}"],
-                            )
-                        else:
-                            print(f"Failed to generate embedding for table image at: {image_path}")
-                    else:
-                        print("Table image path is empty or invalid. Skipping.")
+    def build_vectorstore(self, text_docs):
+        if not text_docs.strip():
+            print("No text found. Creating a minimal vectorstore with a dummy doc.")
+            text_docs = "This document contains no textual content. Only tables or images."
 
-            except Exception as e:
-                print(f"Error processing element: {element}. Error: {e}")
+        # text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
+        # chunks = text_splitter.split_text(text_docs)
+
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=0,
+            separators=["\n\n", "\n", " ", ""]
+        )
+        chunks = text_splitter.split_text(text_docs)
+
+        documents = [Document(page_content=chunk) for chunk in chunks]
+
+        self.vectorstore = Chroma.from_documents(
+            documents=documents,
+            embedding=self.embeddings,
+            persist_directory=self.db_path
+        )
+
+    def add_tables_to_vectorstore(self, tables):
+        if not self.vectorstore:
+            print("Vector store not initialized. Please build it first.")
+            return
+
+        table_docs = []
+        for table in tables:
+            image_path = table.get("image_path", "").strip()
+            if image_path:
+                image_response = self.vision_agent.run(
+                    "Describe this table image in detail.",
+                    images=[image_path]
+                )
+                image_description = image_response.content  # Use .content
+                # print(image_description)
+                if image_description and image_description.strip():
+                    table_docs.append(Document(page_content=image_description))
+                else:
+                    print(f"No description returned for {image_path}. Skipping.")
+            else:
+                print("Table image path is empty or invalid. Skipping.")
+
+        if table_docs:
+            self.vectorstore.add_documents(table_docs)
+
+    def initialize_knowledge_base(self):
+        if not self.vectorstore:
+            print("Vector store not created yet. Cannot initialize knowledge base.")
+            return
+        retriever = self.vectorstore.as_retriever()
+        self.knowledge_base = LangChainKnowledgeBase(retriever=retriever)
+        self.agent.knowledge_base = self.knowledge_base
 
     def query(self, prompt: str):
-        """Query the system to retrieve relevant content and generate a response."""
+        if not self.knowledge_base:
+            print("Knowledge base not initialized.")
+            return "Knowledge base not initialized."
         try:
-            # Embed the prompt to create the query vector
-            query_embedding = self.embedder.get_embedding(prompt)
-
-            # Query text vector database
-            text_results = self.text_vector_db.get_nearest_neighbors(
-                query_embedding=query_embedding,
-                n_results=3
-            )
-
-            # Query image vector database
-            image_results = self.image_vector_db.get_nearest_neighbors(
-                query_embedding=query_embedding,
-                n_results=3
-            )
-
-            # Combine results into a readable context
-            context = "### Text Summaries:\n"
-            for doc, distance in text_results:
-                context += f"- {doc} (Distance: {distance})\n"
-
-            context += "\n### Image Descriptions:\n"
-            for doc, distance in image_results:
-                context += f"- {doc} (Distance: {distance})\n"
-
-            # Generate a response using GPT-4o
-            final_response = self.agent.print_response(f"Context:\n{context}\n\nQuestion: {prompt}", stream=True)
-            return final_response
-
+            response = self.agent.run(prompt)
+            return response.content  # Use .content instead of .text
         except Exception as e:
             print(f"Error during query: {e}")
             return "An error occurred while querying the knowledge base."
-
 
 if __name__ == "__main__":
     pdf_path = "/home/aifahim/PycharmProjects/test-agentic-rag/src/data/pdfs/Otani_Toward_Verifiable_and_Reproducible_Human_Evaluation_for_Text-to-Image_Generation_CVPR_2023_paper.pdf"
@@ -157,9 +180,23 @@ if __name__ == "__main__":
     table_output_folder = "./extracted_tables"
 
     rag = MultimodalRAG(pdf_path, collection, db_path)
-    parsed_elements = rag.parse_pdf(table_output_folder)
-    rag.process_elements(parsed_elements)
 
-    query = "What insights can we gain from the document?"
-    response = rag.query(query)
-    print(response)
+    # Extract text from PDF
+    pdf_text = rag.extract_pdf_text()
+
+    # Build vectorstore from extracted text
+    rag.build_vectorstore(pdf_text)
+
+    # Extract tables as images
+    parsed_elements = rag.parse_pdf(table_output_folder)
+
+    # Describe table images and add their descriptions to the vector store
+    rag.add_tables_to_vectorstore(parsed_elements)
+
+    # Initialize the knowledge base
+    rag.initialize_knowledge_base()
+
+    # Query the knowledge base
+    query = "give me the annotator performance camparisions for fidality IIA Alignment IAA and Med Time as table"
+    response_text = rag.query(query)
+    print("Agent Response:\n", response_text)
