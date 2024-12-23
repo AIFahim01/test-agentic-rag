@@ -70,7 +70,6 @@ class ExtractedContent:
         self.category = category
         self.metadata = metadata
         self.image_path = image_path
-        # Make compatible with chunk_by_title
         self.text = content
 
     @classmethod
@@ -301,14 +300,19 @@ class MultimodalRAG:
                 hi_res_model_name="yolox",
                 infer_table_structure=True,
                 extract_images_in_pdf=True,
-                extract_image_block_output_dir=str(self.image_dir),  # Changed parameter name
+                extract_image_block_output_dir=str(self.image_dir),
                 extract_image_block_types=["Image", "Table", "Figure"],
                 include_image_data=True,
-                include_chart_data=True,  # Added for better image extraction
-                include_table_data=True,  # Added for better table extraction
+                include_chart_data=True,
+                include_table_data=True,
                 include_page_breaks=True,
                 languages=["eng"]
             )
+
+            media_json = elements_to_json(media_elements)
+            # Save media elements JSON
+            with open(self.output_dir / "media_elements.json", "w", encoding="utf-8") as f:
+                json.dump(media_json, f)
 
             # Process media elements
             image_elements = []
@@ -378,6 +382,11 @@ class MultimodalRAG:
                 extract_images_in_pdf=False
             )
 
+            text_json = elements_to_json(text_elements)
+            # Save text elements JSON
+            with open(self.output_dir / "text_elements.json", "w", encoding="utf-8") as f:
+                json.dump(text_json, f)
+
             # Process text elements
             valid_text_elements = []
             for element in text_elements:
@@ -410,76 +419,149 @@ class MultimodalRAG:
             raise
 
     def _clean_metadata(self, metadata: dict) -> dict:
-        """Clean metadata by removing None values and complex types."""
+        """Clean metadata with detailed debug printing and validation."""
         if not isinstance(metadata, dict):
             self.logger.warning(f"Received non-dict metadata of type {type(metadata)}")
             return {}
-        filtered = {k: v for k, v in metadata.items() if v is not None}
+
+        # Print incoming metadata for debugging
+        self.logger.debug("Incoming metadata structure:")
+        self.logger.debug(json.dumps(metadata, indent=2, default=str))
+
         cleaned = {}
-        for k, v in filtered.items():
-            if isinstance(v, (str, int, float, bool)):
-                cleaned[k] = v
-            elif isinstance(v, (dict, list)):
-                cleaned[k] = str(v)
-        return cleaned
+        try:
+            # Process each metadata field
+            for k, v in metadata.items():
+                # Skip None values
+                if v is None:
+                    self.logger.debug(f"Skipping None value for key: {k}")
+                    continue
+
+                # Handle different types
+                if isinstance(v, (str, int, float, bool)):
+                    cleaned[k] = v
+                elif isinstance(v, (dict, list)):
+                    try:
+                        cleaned[k] = json.dumps(v)
+                    except Exception as e:
+                        self.logger.warning(f"Could not JSON serialize {k}: {str(e)}")
+                else:
+                    # Convert other types to string
+                    try:
+                        cleaned[k] = str(v)
+                    except Exception as e:
+                        self.logger.warning(f"Could not convert {k} to string: {str(e)}")
+
+            # Add processing timestamp
+            cleaned['processing_timestamp'] = datetime.now().isoformat()
+
+            # Validate all values are non-None
+            for k, v in cleaned.items():
+                if v is None:
+                    self.logger.error(f"Found None value for key {k} after cleaning")
+
+            # Print final cleaned metadata
+            self.logger.debug("Cleaned metadata structure:")
+            self.logger.debug(json.dumps(cleaned, indent=2))
+
+            return cleaned
+
+        except Exception as e:
+            self.logger.error(f"Error in metadata cleaning: {str(e)}")
+            # Return a minimal valid metadata dict rather than failing
+            return {
+                'processing_timestamp': datetime.now().isoformat(),
+                'error': f"Metadata cleaning failed: {str(e)}"
+            }
 
     def _process_text_contents(self, contents):
-        """Process text contents by splitting and analyzing them."""
+        """Process text contents with fixed Document handling."""
         if not contents:
             return
 
-        # Limit for demonstration
-        contents = contents[:2]
+        contents = contents[:2]  # Limit for demonstration
         self.logger.info(f"Processing {len(contents)} text elements...")
         text_documents = []
 
         for idx, content in enumerate(contents, 1):
-            if not hasattr(content, 'content') or not hasattr(content, 'metadata'):
-                self.logger.warning(f"Invalid content structure at index {idx}")
-                continue
+            try:
+                # Debug logging
+                self.logger.debug(f"Content {idx} type: {type(content)}")
 
-            chunks = self.text_splitter.split_text(content.content)
-            base_metadata = self._clean_metadata(content.metadata)
+                # Handle string content
+                if isinstance(content, str):
+                    base_metadata = {
+                        'element_type': 'text',
+                        'category': 'text',
+                        'text_length': len(content),
+                        'processing_timestamp': datetime.now().isoformat()
+                    }
+                    content_text = content
+                else:
+                    # Handle ExtractedContent objects
+                    if not hasattr(content, 'content') or not hasattr(content, 'metadata'):
+                        self.logger.warning(f"Invalid content structure at index {idx}")
+                        continue
 
-            for chunk_idx, chunk in enumerate(chunks, 1):
-                chunk_metadata = base_metadata.copy()
-                chunk_metadata.update({
-                    'chunk_number': chunk_idx,
-                    'total_chunks': len(chunks),
-                    'chunk_length': len(chunk)
-                })
+                    base_metadata = {
+                        'element_type': str(content.element_type) if content.element_type else 'unknown',
+                        'category': str(content.category) if content.category else 'unknown',
+                        'text_length': len(content.content) if content.content else 0,
+                        'processing_timestamp': datetime.now().isoformat()
+                    }
+                    content_text = content.content
 
-                try:
+                # Process text chunks
+                chunks = self.text_splitter.split_text(content_text)
+
+                for chunk_idx, chunk in enumerate(chunks, 1):
+                    chunk_metadata = base_metadata.copy()
+                    chunk_metadata.update({
+                        'chunk_number': chunk_idx,
+                        'total_chunks': len(chunks),
+                        'chunk_length': len(chunk)
+                    })
+
                     analysis = self._process_with_retry(
                         self.text_agent,
                         f"Analyze this text:\n{chunk}"
                     )
+
+                    # Create Document with validated metadata
                     doc = Document(
                         page_content=analysis,
                         metadata=chunk_metadata
                     )
                     text_documents.append(doc)
 
-                except Exception as e:
-                    self.logger.error(f"Error processing chunk {chunk_idx} of content {idx}: {str(e)}")
-                    continue
+            except Exception as e:
+                self.logger.error(f"Error processing content {idx}: {str(e)}")
+                continue
 
         if text_documents:
             try:
+                # Ensure we have valid Document objects before creating vectorstore
+                for doc in text_documents:
+                    if not isinstance(doc, Document):
+                        raise ValueError(f"Invalid document type: {type(doc)}")
+                    if not isinstance(doc.metadata, dict):
+                        raise ValueError(f"Invalid metadata type: {type(doc.metadata)}")
+
                 self.text_vectorstore = Chroma.from_documents(
                     documents=text_documents,
                     embedding=self.embeddings,
-                    persist_directory=str(self.kb_dir / "text_kb")
+                    persist_directory=str(self.kb_dir / "text_kb"),
+                    collection_metadata={"source": self.pdf_path}
                 )
                 self.logger.info("Successfully created text vectorstore")
+
             except Exception as e:
                 self.logger.error(f"Error creating text vectorstore: {str(e)}")
                 raise
-        else:
-            self.logger.warning("No valid text documents were created")
+
 
     def _process_image_contents(self, contents):
-        """Process image contents with improved file handling."""
+        """Process image contents with enhanced metadata storage."""
         if not contents:
             return
 
@@ -488,14 +570,13 @@ class MultimodalRAG:
 
         for idx, content in enumerate(contents, 1):
             try:
-                # Get image path with fallback options
+                # Get image path with existing logic
                 image_path = None
                 if hasattr(content, 'image_path') and content.image_path:
                     image_path = content.image_path
                 elif hasattr(content, 'metadata'):
                     page_num = content.metadata.get('page_number')
                     if page_num:
-                        # Try multiple file patterns and formats
                         patterns = [
                             f"*page_{page_num}*.jpg",
                             f"*page_{page_num}*.png",
@@ -512,26 +593,29 @@ class MultimodalRAG:
                     self.logger.warning(f"No valid image file found for image {idx}")
                     continue
 
-                metadata = content.metadata if isinstance(content.metadata, dict) else {}
-                metadata['image_path'] = image_path
-                metadata = self._clean_metadata(metadata)
+                # Enhanced metadata collection
+                image_metadata = {
+                    'image_path': image_path,
+                    'element_type': content.element_type,
+                    'category': content.category,
+                    'original_metadata': content.metadata,
+                    'processing_timestamp': datetime.now().isoformat()
+                }
 
-                prompt = """Analyze this image in detail:
+                analysis = self._process_with_retry(
+                    self.vision_agent,
+                    """Analyze this image in detail:
     1. What type of visual content is this (e.g., figure, chart, photo)?
     2. What are the main visual elements and their relationships?
     3. What key information or findings does this image convey?
     4. Are there any notable patterns or trends?
-    5. How does this relate to the document's content?"""
-
-                analysis = self._process_with_retry(
-                    self.vision_agent,
-                    prompt,
+    5. How does this relate to the document's content?""",
                     images=[image_path]
                 )
 
                 doc = Document(
                     page_content=analysis,
-                    metadata=metadata
+                    metadata=self._clean_metadata(image_metadata)
                 )
                 image_documents.append(doc)
                 self.logger.info(f"Successfully processed image {idx}")
@@ -545,7 +629,12 @@ class MultimodalRAG:
                 self.image_vectorstore = Chroma.from_documents(
                     documents=image_documents,
                     embedding=self.embeddings,
-                    persist_directory=str(self.kb_dir / "image_kb")
+                    persist_directory=str(self.kb_dir / "image_kb"),
+                    collection_metadata={
+                        "source": self.pdf_path,
+                        "type": "image",
+                        "timestamp": datetime.now().isoformat()
+                    }
                 )
                 self.logger.info("Successfully created image vectorstore")
             except Exception as e:
@@ -553,24 +642,42 @@ class MultimodalRAG:
                 raise
 
     def _process_table_contents(self, contents):
-        """Process table contents using text agent for analysis."""
+        """Process table contents with enhanced metadata storage."""
         if not contents:
             return
 
-        # Limit for demonstration
         contents = contents[:2]
         self.logger.info(f"Processing {len(contents)} table elements...")
         table_documents = []
 
         for idx, content in enumerate(contents, 1):
             try:
-                metadata = self._clean_metadata(content.metadata)
-                prompt = f"""Analyze this table content:
-{content.content}
+                # Enhance metadata collection for tables
+                table_metadata = {
+                    'element_type': content.element_type,
+                    'category': content.category,
+                    'original_metadata': content.metadata,
+                    'processing_timestamp': datetime.now().isoformat(),
+                    'page_number': content.metadata.get('page_number'),
+                    'table_length': len(content.content) if content.content else 0
+                }
 
-1. What is the structure and organization of this data?
-2. What are the key findings or patterns?
-3. How does this information relate to the document's context?"""
+                # Store HTML representation if available
+                if hasattr(content.metadata, 'text_as_html'):
+                    table_metadata['table_html'] = content.metadata.text_as_html
+                elif isinstance(content.metadata, dict) and 'text_as_html' in content.metadata:
+                    table_metadata['table_html'] = content.metadata['text_as_html']
+
+                # Add coordinate information if available
+                if isinstance(content.metadata, dict) and 'coordinates' in content.metadata:
+                    table_metadata['coordinates'] = content.metadata['coordinates']
+
+                prompt = f"""Analyze this table content:
+    {content.content}
+
+    1. What is the structure and organization of this data?
+    2. What are the key findings or patterns?
+    3. How does this information relate to the document's context?"""
 
                 analysis = self._process_with_retry(
                     self.text_agent,
@@ -579,7 +686,7 @@ class MultimodalRAG:
 
                 doc = Document(
                     page_content=analysis,
-                    metadata=metadata
+                    metadata=self._clean_metadata(table_metadata)
                 )
                 table_documents.append(doc)
                 self.logger.info(f"Successfully processed table {idx}")
@@ -593,13 +700,17 @@ class MultimodalRAG:
                 self.table_vectorstore = Chroma.from_documents(
                     documents=table_documents,
                     embedding=self.embeddings,
-                    persist_directory=str(self.kb_dir / "table_kb")
+                    persist_directory=str(self.kb_dir / "table_kb"),
+                    collection_metadata={
+                        "source": self.pdf_path,
+                        "type": "table",
+                        "timestamp": datetime.now().isoformat()
+                    }
                 )
                 self.logger.info("Successfully created table vectorstore")
             except Exception as e:
                 self.logger.error(f"Error creating table vectorstore: {str(e)}")
                 raise
-
     def _create_metadata_aware_prompt(self, query: str, sources: Dict) -> str:
         """Create a prompt that includes metadata context."""
         prompt = f"""Answer this query using the provided information and metadata:
