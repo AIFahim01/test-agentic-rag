@@ -472,17 +472,17 @@ class MultimodalRAG:
             # Process tables first
             table_elements = self._extract_table_content()
             if table_elements:
-                self._process_tables(table_elements[:2])  # Limit for testing
+                self._process_tables(table_elements)
 
             # Extract and process images (existing code)
             image_elements = self._extract_image_content()
             if image_elements:
-                self._process_images(image_elements[:2])
+                self._process_images(image_elements)
 
             # Extract and process text (existing code)
             text_elements = self._extract_text_content()
             if text_elements:
-                self._process_text(text_elements[:2])
+                self._process_text(text_elements)
 
             self.logger.info("Document processing complete")
 
